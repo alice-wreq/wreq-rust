@@ -12,7 +12,9 @@ jobs:
       - name: Trigger wreq-js rebuild
         uses: peter-evans/repository-dispatch@v3
         with:
-          token: ${{ secrets.WREQ_JS_DISPATCH_TOKEN || secrets.GITHUB_TOKEN }}
+          # Cross-repo dispatch needs a PAT (repo scope) stored as WREQ_JS_DISPATCH_TOKEN.
+          # Create: GitHub → Settings → Developer settings → PAT → org alice-wreq access.
+          token: ${{ secrets.WREQ_JS_DISPATCH_TOKEN }}
           repository: alice-wreq/wreq-js
           event-type: wreq-rust-updated
           client-payload: |
