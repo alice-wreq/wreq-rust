@@ -1,0 +1,22 @@
+name: notify-wreq-js
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger wreq-js rebuild
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.WREQ_JS_DISPATCH_TOKEN || secrets.GITHUB_TOKEN }}
+          repository: alice-wreq/wreq-js
+          event-type: wreq-rust-updated
+          client-payload: |
+            {
+              "sha": "${{ github.sha }}",
+              "ref": "${{ github.ref }}"
+            }
