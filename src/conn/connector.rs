@@ -413,7 +413,7 @@ impl ConnectorService {
                     }
                 }
 
-                if is_https {
+                if is_https && !proxy.force_absolute() {
                     trace!("tunneling over HTTP(s) proxy: {:?}", proxy_uri);
 
                     // Build an HTTPS connector.

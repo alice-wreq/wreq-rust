@@ -99,6 +99,8 @@ enum ProxyScheme {
 struct Extra {
     auth: Option<HeaderValue>,
     misc: Option<HeaderMap>,
+    /// Skip CONNECT for HTTPS destinations; send absolute-form to the proxy.
+    force_absolute: bool,
 }
 
 // ===== impl Proxy =====
@@ -182,10 +184,7 @@ impl Proxy {
 
     fn new(scheme: ProxyScheme) -> Proxy {
         Proxy {
-            extra: Extra {
-                auth: None,
-                misc: None,
-            },
+            extra: Extra::default(),
             scheme,
             no_proxy: None,
         }
@@ -286,6 +285,12 @@ impl Proxy {
     /// ```
     pub fn no_proxy(mut self, no_proxy: Option<NoProxy>) -> Proxy {
         self.no_proxy = no_proxy;
+        self
+    }
+
+    /// Skip CONNECT for HTTPS destinations; use absolute-form HTTP to the proxy.
+    pub fn force_absolute(mut self, enable: bool) -> Proxy {
+        self.extra.force_absolute = enable;
         self
     }
 
@@ -397,6 +402,7 @@ impl Hash for Extra {
         } else {
             1u8.hash(state);
         }
+        self.force_absolute.hash(state);
     }
 }
 

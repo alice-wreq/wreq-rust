@@ -165,6 +165,12 @@ impl Intercept {
         self.extra.misc.as_ref()
     }
 
+    #[inline]
+    pub(crate) fn force_absolute(&self) -> bool {
+        self.extra.force_absolute
+            || std::env::var_os("WREQ_FORCE_ABSOLUTE_PROXY").is_some_and(|v| v != "0")
+    }
+
     #[cfg(feature = "socks")]
     pub(crate) fn raw_auth(&self) -> Option<(Bytes, Bytes)> {
         if let Auth::Raw(ref u, ref p) = self.auth {
