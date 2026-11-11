@@ -60,8 +60,10 @@ use crate::dns::hickory::HickoryDnsResolver;
 use crate::{
     IntoUri, Method, Proxy,
     conn::{
-        BoxedConnectorLayer, BoxedConnectorService, Conn, Unnameable, connector::Connector,
-        http::HttpConnect, net::SocketBindOptions,
+        BoxedConnectorLayer, BoxedTransportConnector, Conn, Unnameable,
+        connector::{Connector, ConnectorBuilder},
+        http::HttpConnect,
+        net::SocketBindOptions,
     },
     dns::{DnsResolverWithOverrides, DynResolver, GaiResolver, IntoResolve, Resolve},
     error::{self, Error},
@@ -71,7 +73,7 @@ use crate::{
     proxy::Matcher as ProxyMatcher,
     redirect::{self, FollowRedirectPolicy},
     retry,
-    rt::{BoxSendFuture, Executor, Timer},
+    rt::{Executor, Timer},
     tls::{
         AlpnProtocol, TlsOptions, TlsVersion,
         keylog::KeyLog,
@@ -502,7 +504,8 @@ impl ClientBuilder {
                 DynResolver::new(resolver)
             };
 
-            let connector = Connector::builder(config.proxies, resolver)
+            let connector = ConnectorBuilder::new(config.proxies, resolver)
+                .timer(config.timer.clone())
                 .timeout(config.connect_timeout)
                 .tls_info(config.tls_info)
                 .tcp_nodelay(config.tcp_nodelay)
@@ -638,28 +641,6 @@ impl ClientBuilder {
         Ok(Client(Arc::new(client)))
     }
 
-    // Runtime options
-
-    /// Provide a timer to be used for timeouts and intervals in client.
-    #[inline]
-    pub fn timer<M>(mut self, timer: M) -> Self
-    where
-        M: wreq_proto::rt::Timer + Send + Sync + 'static,
-    {
-        self.config.timer = Timer::new(timer);
-        self
-    }
-
-    /// Provide an executor to run background tasks in the client.
-    #[inline]
-    pub fn executor<E>(mut self, executor: E) -> Self
-    where
-        E: wreq_proto::rt::Executor<BoxSendFuture> + Send + Sync + 'static,
-    {
-        self.config.executor = Executor::new(executor);
-        self
-    }
-
     // Higher-level options
 
     /// Sets the `User-Agent` header to be used by this client.
@@ -789,9 +770,8 @@ impl ClientBuilder {
     ///
     /// If auto gzip decompression is turned on:
     ///
-    /// - When sending a request and if the request's headers do not already contain an
-    ///   `Accept-Encoding` **and** `Range` values, the `Accept-Encoding` header is set to `gzip`.
-    ///   The request body is **not** automatically compressed.
+    /// - Requests without `Accept-Encoding` advertise `gzip`. Range requests use `Accept-Encoding:
+    ///   identity` instead. The request body is **not** automatically compressed.
     /// - When receiving a response, if its headers contain a `Content-Encoding` value of `gzip`,
     ///   both `Content-Encoding` and `Content-Length` are removed from the headers' set. The
     ///   response body is automatically decompressed.
@@ -813,9 +793,8 @@ impl ClientBuilder {
     ///
     /// If auto brotli decompression is turned on:
     ///
-    /// - When sending a request and if the request's headers do not already contain an
-    ///   `Accept-Encoding` **and** `Range` values, the `Accept-Encoding` header is set to `br`. The
-    ///   request body is **not** automatically compressed.
+    /// - Requests without `Accept-Encoding` advertise `br`. Range requests use `Accept-Encoding:
+    ///   identity` instead. The request body is **not** automatically compressed.
     /// - When receiving a response, if its headers contain a `Content-Encoding` value of `br`, both
     ///   `Content-Encoding` and `Content-Length` are removed from the headers' set. The response
     ///   body is automatically decompressed.
@@ -837,9 +816,8 @@ impl ClientBuilder {
     ///
     /// If auto zstd decompression is turned on:
     ///
-    /// - When sending a request and if the request's headers do not already contain an
-    ///   `Accept-Encoding` **and** `Range` values, the `Accept-Encoding` header is set to `zstd`.
-    ///   The request body is **not** automatically compressed.
+    /// - Requests without `Accept-Encoding` advertise `zstd`. Range requests use `Accept-Encoding:
+    ///   identity` instead. The request body is **not** automatically compressed.
     /// - When receiving a response, if its headers contain a `Content-Encoding` value of `zstd`,
     ///   both `Content-Encoding` and `Content-Length` are removed from the headers' set. The
     ///   response body is automatically decompressed.
@@ -861,9 +839,8 @@ impl ClientBuilder {
     ///
     /// If auto deflate decompression is turned on:
     ///
-    /// - When sending a request and if the request's headers do not already contain an
-    ///   `Accept-Encoding` **and** `Range` values, the `Accept-Encoding` header is set to
-    ///   `deflate`. The request body is **not** automatically compressed.
+    /// - Requests without `Accept-Encoding` advertise `deflate`. Range requests use
+    ///   `Accept-Encoding: identity` instead. The request body is **not** automatically compressed.
     /// - When receiving a response, if it's headers contain a `Content-Encoding` value that equals
     ///   to `deflate`, both values `Content-Encoding` and `Content-Length` are removed from the
     ///   headers' set. The response body is automatically decompressed.
@@ -964,7 +941,11 @@ impl ClientBuilder {
         self
     }
 
-    /// Enable or disable automatic setting of the `Referer` header.
+    /// Enable or disable automatic `Referer` management during redirects.
+    ///
+    /// When enabled, redirect responses can control how an existing `Referer`
+    /// is forwarded through `Referrer-Policy`. No header is added when the
+    /// request has none.
     ///
     /// Default is `true`.
     #[inline]
@@ -1031,7 +1012,9 @@ impl ClientBuilder {
         self
     }
 
-    /// Set a timeout for only the read phase of a `Client`.
+    /// Sets a timeout for waiting for response headers and reading each body frame.
+    ///
+    /// Time spent by the caller between body reads is not counted.
     ///
     /// Default is `None`.
     #[inline]
@@ -1042,12 +1025,10 @@ impl ClientBuilder {
 
     /// Set a timeout for only the connect phase of a `Client`.
     ///
+    /// The timeout covers DNS resolution, the complete TCP address race,
+    /// proxy tunneling, and the TLS handshake.
+    ///
     /// Default is `None`.
-    ///
-    /// # Note
-    ///
-    /// This **requires** the futures be executed in a tokio runtime with
-    /// a tokio timer enabled.
     #[inline]
     pub fn connect_timeout(mut self, timeout: Duration) -> ClientBuilder {
         self.config.connect_timeout = Some(timeout);
@@ -1266,18 +1247,17 @@ impl ClientBuilder {
         self
     }
 
-    /// Set timeout for [RFC 6555 (Happy Eyeballs)][RFC 6555] algorithm.
+    /// Set the delay between connection attempts for
+    /// [RFC 8305 (Happy Eyeballs v2)][RFC 8305].
     ///
-    /// If hostname resolves to both IPv4 and IPv6 addresses and connection
-    /// cannot be established using preferred address family before timeout
-    /// elapses, then connector will in parallel attempt connection using other
-    /// address family.
+    /// The first address is attempted immediately. Later addresses are started
+    /// after this delay without waiting for the previous attempt to finish.
     ///
     /// If `None`, parallel connection attempts are disabled.
     ///
     /// Default is 300 milliseconds.
     ///
-    /// [RFC 6555]: https://tools.ietf.org/html/rfc6555
+    /// [RFC 8305]: https://www.rfc-editor.org/rfc/rfc8305.html#section-5
     #[inline]
     pub fn tcp_happy_eyeballs_timeout<D>(mut self, val: D) -> ClientBuilder
     where
@@ -1653,7 +1633,7 @@ impl ClientBuilder {
     #[inline]
     pub fn connector_layer<L>(mut self, layer: L) -> ClientBuilder
     where
-        L: Layer<BoxedConnectorService> + Clone + Send + Sync + 'static,
+        L: Layer<BoxedTransportConnector> + Clone + Send + Sync + 'static,
         L::Service:
             Service<Unnameable, Response = Conn, Error = BoxError> + Clone + Send + Sync + 'static,
         <L::Service as Service<Unnameable>>::Future: Send + 'static,

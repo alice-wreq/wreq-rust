@@ -54,36 +54,38 @@ pin_project! {
 pin_project! {
     /// A body wrapper that enforces a timeout for each read operation.
     ///
-    /// The timeout resets after every successful read. If a single read
-    /// takes longer than the specified duration, an error is returned.
+    /// The deadline starts when a frame poll begins and is disarmed once it completes,
+    /// so time spent between reads is not counted.
     pub struct ReadTimeoutBody<B> {
-        timeout: Duration,
-        #[pin]
-        sleep: Option<Pin<Box<dyn Sleep>>>,
         #[pin]
         body: B,
+        #[pin]
+        sleep: Option<Pin<Box<dyn Sleep>>>,
+        armed: bool,
+        timeout: Duration,
         timer: Timer,
     }
 }
 
-/// ==== impl TimeoutBody ====
+// ===== impl TimeoutBody =====
+
 impl<B> TimeoutBody<B> {
-    /// Creates a new [`TimeoutBody`] with no timeout.
+    /// Wraps a body with the active total timeout and an optional read timeout.
     pub fn new(
-        timer: Timer,
-        deadline: Option<Duration>,
-        read_timeout: Option<Duration>,
         body: B,
+        timer: Timer,
+        read_timeout: Option<Duration>,
+        total_timeout: Option<Pin<Box<dyn Sleep>>>,
     ) -> Self {
-        let deadline = deadline.map(|deadline| timer.sleep(deadline));
-        match (deadline, read_timeout) {
+        match (total_timeout, read_timeout) {
             (Some(total_timeout), Some(read_timeout)) => TimeoutBody::CombinedTimeout {
                 body: TotalTimeoutBody {
                     timeout: total_timeout,
                     body: ReadTimeoutBody {
-                        timeout: read_timeout,
-                        sleep: None,
                         body,
+                        sleep: None,
+                        armed: false,
+                        timeout: read_timeout,
                         timer,
                     },
                 },
@@ -95,6 +97,7 @@ impl<B> TimeoutBody<B> {
                 body: ReadTimeoutBody {
                     timeout,
                     sleep: None,
+                    armed: false,
                     body,
                     timer,
                 },
@@ -160,7 +163,8 @@ where
     )
 }
 
-// ==== impl TotalTimeoutBody ====
+// ===== impl TotalTimeoutBody =====
+
 impl<B> Body for TotalTimeoutBody<B>
 where
     B: Body,
@@ -191,7 +195,8 @@ where
     }
 }
 
-/// ==== impl ReadTimeoutBody ====
+// ===== impl ReadTimeoutBody =====
+
 impl<B> Body for ReadTimeoutBody<B>
 where
     B: Body,
@@ -206,28 +211,27 @@ where
     ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
         let mut this = self.project();
 
-        // Error if the timeout has expired.
-        if this.sleep.is_none() {
-            this.sleep.set(Some(this.timer.sleep(*this.timeout)));
+        // Arm the deadline when a new frame poll begins, reusing the sleep after the first read.
+        if !*this.armed {
+            let deadline = this.timer.now() + *this.timeout;
+            match this.sleep.as_mut().as_pin_mut() {
+                Some(sleep) => this.timer.reset(sleep.get_mut(), deadline),
+                None => this.sleep.set(Some(this.timer.sleep_until(deadline))),
+            }
+            *this.armed = true;
         }
 
         // Error if the timeout has expired.
-        if let Some(sleep) = this.sleep.as_mut().as_pin_mut() {
-            if sleep.poll(cx).is_ready() {
-                return Poll::Ready(Some(Err(Box::new(TimedOut))));
-            }
+        if let Some(sleep) = this.sleep.as_mut().as_pin_mut()
+            && sleep.poll(cx).is_ready()
+        {
+            return Poll::Ready(Some(Err(Error::body(TimedOut).into())));
         }
 
-        // Poll the actual body
-        match ready!(this.body.poll_frame(cx)) {
-            Some(Ok(frame)) => {
-                // Reset timeout on successful read
-                this.sleep.set(None);
-                Poll::Ready(Some(Ok(frame)))
-            }
-            Some(Err(err)) => Poll::Ready(Some(Err(err.into()))),
-            None => Poll::Ready(None),
-        }
+        // A completed frame poll disarms the deadline until the next read starts.
+        let frame = ready!(this.body.poll_frame(cx));
+        *this.armed = false;
+        Poll::Ready(frame.map(|res| res.map_err(Into::into)))
     }
 
     #[inline(always)]
