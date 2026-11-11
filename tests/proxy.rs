@@ -287,6 +287,32 @@ async fn http_proxy_custom_headers() {
 }
 
 #[tokio::test]
+async fn force_absolute_skips_connect_for_https() {
+    let url = "https://hyper.rs.local/prox";
+    let server = server::http(move |req| {
+        assert_eq!(req.method(), "GET");
+        assert_eq!(req.uri(), url);
+        assert_eq!(req.headers()["host"], "hyper.rs.local");
+
+        async { http::Response::default() }
+    });
+
+    let proxy = format!("http://{}", server.addr());
+
+    let res = Client::builder()
+        .proxy(wreq::Proxy::https(&proxy).unwrap().force_absolute(true))
+        .build()
+        .unwrap()
+        .get(url)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.uri(), url);
+    assert_eq!(res.status(), wreq::StatusCode::OK);
+}
+
+#[tokio::test]
 async fn tunnel_detects_auth_required() {
     let url = "https://hyper.rs.local/prox";
 
