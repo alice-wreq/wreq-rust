@@ -10,6 +10,10 @@ Fork of [0x676e67/wreq](https://github.com/0x676e67/wreq) (Apache-2.0) for the a
   the request to the proxy in absolute-form (`src/proxy.rs`, `src/proxy/matcher.rs`,
   `src/conn/connector.rs`). `WREQ_FORCE_ABSOLUTE_PROXY=1` enables it process-wide.
   Test: `tests/proxy.rs::force_absolute_skips_connect_for_https`.
+- `btls`, `btls-sys`, `tokio-btls` come from [alice-wreq/btls](https://github.com/alice-wreq/btls)
+  (upstream `v0.5.6` + `prefix-symbols` on Apple targets). Upstream 0.5.6 prefixes only the bindings on
+  macOS, so a binary that also links OpenSSL does not link. A crate that depends on `btls` beside wreq
+  must name the same git source.
 - `.github/workflows/notify-wreq-js.yml` — `repository_dispatch` to wreq-js on `main` push.
 
 ## Remotes
