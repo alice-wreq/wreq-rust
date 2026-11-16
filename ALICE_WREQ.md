@@ -2,7 +2,8 @@
 
 Fork of [0x676e67/wreq](https://github.com/0x676e67/wreq) (Apache-2.0) for the alice-wreq stack.
 
-**Current base: upstream `v0.16.3`** → released here as tag **`alice-v0.16.3`**.
+**Current base: upstream `v0.16.3`** → released here as tag **`alice-v0.16.4`**
+(`alice-v0.16.3` is the same base with `btls` from crates.io).
 
 ## Fork changes
 
