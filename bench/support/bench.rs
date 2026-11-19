@@ -40,8 +40,9 @@ pub fn bench(
 
     let system = sysinfo::System::new_all();
     let cpu_model = system
-        .cpus()
-        .first()
+        .as_ref()
+        .ok()
+        .and_then(|system| system.cpus().first())
         .map_or("n/a", |cpu| cpu.brand().trim_start().trim_end());
 
     for &concurrent_limit in CONCURRENT_CASES {

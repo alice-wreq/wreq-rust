@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Trigger wreq-js rebuild
-        uses: peter-evans/repository-dispatch@v3
+        uses: peter-evans/repository-dispatch@v4
         with:
           # Cross-repo dispatch needs a PAT (repo scope) stored as WREQ_JS_DISPATCH_TOKEN.
           # Create: GitHub → Settings → Developer settings → PAT → org alice-wreq access.
