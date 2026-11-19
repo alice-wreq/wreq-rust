@@ -39,6 +39,7 @@ pub enum TunnelError {
     ProxyAuthRequired,
     TunnelUnexpectedEof,
     TunnelUnsuccessful(Option<u16>),
+    ProxyIpDenied,
 }
 
 impl<C> TunnelConnector<C> {
@@ -188,13 +189,59 @@ where
         let mut res = httparse::Response::new(&mut headers);
         match res.parse(&buf).map_err(TunnelError::Parse)? {
             httparse::Status::Partial => continue,
-            httparse::Status::Complete(_) => match res.code {
+            httparse::Status::Complete(end) => match res.code {
                 Some(200) => return Ok(conn),
                 Some(407) => return Err(TunnelError::ProxyAuthRequired),
+                Some(512)
+                    if res.reason == Some("auth ip err")
+                        || has_ip_denial(&mut conn, res.headers, &buf[end..]).await =>
+                {
+                    return Err(TunnelError::ProxyIpDenied);
+                }
                 status => return Err(TunnelError::TunnelUnsuccessful(status)),
             },
         }
     }
+}
+
+// Recognize the provider's diagnostic without exposing arbitrary proxy response bodies.
+async fn has_ip_denial<T: AsyncRead + Unpin>(
+    conn: &mut T,
+    headers: &[httparse::Header<'_>],
+    buffered: &[u8],
+) -> bool {
+    use futures_util::future::{Either, select};
+    use wreq_proto::rt::Timer as _;
+
+    const MESSAGE: &[u8; 11] = b"auth ip err";
+    let mut lengths = headers
+        .iter()
+        .filter(|h| h.name.eq_ignore_ascii_case("content-length"));
+    if lengths.next().map(|h| h.value) != Some(b"11")
+        || lengths.next().is_some()
+        || headers
+            .iter()
+            .any(|h| h.name.eq_ignore_ascii_case("transfer-encoding"))
+    {
+        return false;
+    }
+    if buffered.len() >= MESSAGE.len() {
+        return buffered.starts_with(MESSAGE);
+    }
+    if !MESSAGE.starts_with(buffered) {
+        return false;
+    }
+    let timer = crate::rt::Timer::default();
+    if timer.is_empty() {
+        return false;
+    }
+    let mut tail = [0; MESSAGE.len()];
+    let tail = &mut tail[..MESSAGE.len() - buffered.len()];
+    let deadline = timer.sleep(std::time::Duration::from_millis(100));
+    matches!(
+        select(std::pin::pin!(conn.read_exact(tail)), deadline).await,
+        Either::Left((Ok(_), _))
+    ) && tail == &MESSAGE[buffered.len()..]
 }
 
 impl std::fmt::Display for TunnelError {
@@ -202,6 +249,7 @@ impl std::fmt::Display for TunnelError {
         f.write_str("tunnel error: ")?;
 
         match self {
+            TunnelError::ProxyIpDenied => f.write_str("unsuccessful (status 512): auth ip err"),
             TunnelError::MissingHost => f.write_str("missing destination host"),
             TunnelError::ProxyAuthRequired => f.write_str("proxy authorization required"),
             TunnelError::Parse(_) => f.write_str("invalid proxy response"),
@@ -224,5 +272,42 @@ impl std::error::Error for TunnelError {
             TunnelError::ConnectFailed(e) => Some(&**e),
             _ => None,
         }
+    }
+}
+
+#[cfg(all(test, feature = "tokio-rt"))]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn recognizes_only_confirmed_ip_denials_without_waiting_for_eof() {
+        let length = httparse::Header {
+            name: "Content-Length",
+            value: b"11",
+        };
+        let (mut reader, mut writer) = tokio::io::duplex(32);
+        // With no declared body even a permanently open connection must be ready on first poll.
+        use futures_util::FutureExt as _;
+        assert_eq!(
+            has_ip_denial(&mut reader, &[], &[]).now_or_never(),
+            Some(false)
+        );
+        assert!(!has_ip_denial(&mut reader, &[length], b"private msg").await);
+        let send = async {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            writer.write_all(b"ip err").await.unwrap();
+        };
+        let lengths = [length];
+        let (recognized, ()) = tokio::join!(has_ip_denial(&mut reader, &lengths, b"auth "), send);
+        assert!(recognized);
+        let timeout = tokio::time::timeout(Duration::from_secs(1), async {
+            has_ip_denial(&mut reader, &[length], &[]).await
+        });
+        assert!(
+            !timeout
+                .await
+                .expect("missing body must not block the refusal")
+        );
     }
 }
