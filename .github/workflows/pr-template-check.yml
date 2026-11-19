@@ -23,8 +23,15 @@ jobs:
             const body = context.payload.pull_request.body || "";
             const statement = "- [x] The description, docs, and comments (words meant for humans) are written by a human, not by an LLM.";
 
-            if (!body.includes(statement)) {
-              core.setFailed(
-                "PR description must include the checked human-authorship statement from the template. Check it only if it accurately describes your contribution."
-              );
-            }
+            if (body.includes(statement)) return;
+
+            // Private organization membership can appear as CONTRIBUTOR in the event.
+            const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
+              ...context.repo,
+              username: context.payload.pull_request.user.login,
+            });
+            if (["admin", "maintain", "write"].includes(data.permission)) return;
+
+            core.setFailed(
+              "PR description must include the checked human-authorship statement from the template. Check it only if it accurately describes your contribution."
+            );
