@@ -14,7 +14,10 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
 };
-use wreq::{Client, tls::trust::CertStore};
+use wreq::{
+    Client,
+    tls::{TlsInfo, trust::CertStore},
+};
 
 /// Self-signed certificate valid for `wreq.test` and `192.0.2.1`.
 fn self_signed() -> (X509, PKey<Private>) {
@@ -102,4 +105,75 @@ async fn verify_host_overrides_uri_host() {
     assert!(get("wreq.test").await.unwrap().status().is_success());
     assert!(get("192.0.2.1").await.unwrap().status().is_success());
     assert!(get("other.test").await.is_err());
+}
+
+#[tokio::test]
+async fn self_signed_peer_certificate_can_be_trusted_explicitly() {
+    let (cert, key) = self_signed();
+    let addr = serve(&cert, &key).await;
+    let url = format!("https://wreq.test:{}/", addr.port());
+    let builder = || Client::builder().no_proxy().resolve("wreq.test", addr);
+
+    let response = builder()
+        .tls_cert_verification(false)
+        .tls_info(true)
+        .build()
+        .unwrap()
+        .get(&url)
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let peer = response
+        .extensions()
+        .get::<TlsInfo>()
+        .unwrap()
+        .peer_certificate()
+        .unwrap();
+    assert_eq!(peer, cert.to_der().unwrap());
+    let trust = CertStore::builder().add_der_cert(peer).build().unwrap();
+    let client = builder().tls_cert_store(trust.clone()).build().unwrap();
+    assert!(client.get(&url).send().await.unwrap().status().is_success());
+
+    let (other_cert, other_key) = self_signed();
+    let other_addr = serve(&other_cert, &other_key).await;
+    let other = Client::builder()
+        .no_proxy()
+        .resolve("wreq.test", other_addr)
+        .tls_cert_store(trust.clone())
+        .build()
+        .unwrap();
+    let other_url = format!("https://wreq.test:{}/", other_addr.port());
+    assert!(other.get(other_url).send().await.unwrap_err().is_connect());
+
+    // The certificate covers wreq.test but not the loopback IP address.
+    let wrong_host = format!("https://{addr}/");
+    assert!(
+        client
+            .get(&wrong_host)
+            .send()
+            .await
+            .unwrap_err()
+            .is_connect()
+    );
+    let skip_hostname = || Client::builder().no_proxy().tls_verify_hostname(false);
+    let trusted = skip_hostname().tls_cert_store(trust).build().unwrap();
+    assert!(
+        trusted
+            .get(&wrong_host)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let untrusted = skip_hostname().build().unwrap();
+    assert!(
+        untrusted
+            .get(&wrong_host)
+            .send()
+            .await
+            .unwrap_err()
+            .is_connect()
+    );
 }
