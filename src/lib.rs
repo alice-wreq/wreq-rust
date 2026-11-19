@@ -221,7 +221,10 @@
 //! The following are a list of [Cargo features][cargo-features] that can be
 //! enabled or disabled:
 //!
-//! - **cookies**: Provides cookie session support.
+//! - **cookies**: Provides cookie session support. Cookies scoped to a single-label domain such as
+//!   `com` are rejected unless it is the request host.
+//! - **cookies-psl**: Also rejects cookies scoped to any public suffix, using the Public Suffix
+//!   List.
 //! - **gzip**: Provides response body gzip decompression.
 //! - **brotli**: Provides response body brotli decompression.
 //! - **zstd**: Provides response body zstd decompression.

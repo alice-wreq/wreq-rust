@@ -282,6 +282,30 @@ fn track_expiry(next_expiry: &mut Option<OffsetDateTime>, cookie: &RawCookie<'_>
     }
 }
 
+/// Determines whether `domain` is a public suffix under RFC 6265 section 5.3 step 5.
+///
+/// With the `cookies-psl` feature this uses the Public Suffix List, including its private
+/// section. Without it, only single-label domains such as `com` count.
+///
+/// https://www.rfc-editor.org/rfc/rfc6265.html#section-5.3
+pub fn is_public_suffix(domain: &CanonicalHost) -> bool {
+    let Host::Domain(domain) = domain else {
+        return false;
+    };
+    // A trailing dot names the same suffix, e.g. `com.` for `com`.
+    let domain = domain.strip_suffix('.').unwrap_or(domain);
+
+    #[cfg(feature = "cookies-psl")]
+    {
+        psl::suffix_str(domain).is_some_and(|suffix| suffix == domain)
+    }
+
+    #[cfg(not(feature = "cookies-psl"))]
+    {
+        !domain.contains('.')
+    }
+}
+
 /// Applies the RFC 6265 request selection rules supported by this HTTP client.
 fn request_matches_cookie(
     uri: &Uri,
